@@ -8,3 +8,4 @@ pub mod memory;
 pub mod opcode;
 pub mod stack;
 pub mod state;
+pub mod types;
