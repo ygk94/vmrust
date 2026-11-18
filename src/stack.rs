@@ -22,7 +22,6 @@ impl Default for Stack {
 impl Stack {
     /// Pile vide, avec la place pour 1024 mots réservée d'un coup : plus aucune
     /// réallocation pendant l'exécution.
-    // Boucle : AVANT. Pile vide créée au démarrage de la VM.
     pub fn new() -> Self {
         Stack {
             items: Vec::with_capacity(STACK_LIMIT),
@@ -30,7 +29,6 @@ impl Stack {
     }
 
     /// Empile `value`. Erreur si la pile contient déjà 1024 éléments.
-    // Boucle : 4. FAIRE. Pose un résultat ; source de StackOverflow.
     #[inline]
     pub fn push(&mut self, value: Word) -> Result<()> {
         if self.items.len() >= STACK_LIMIT {
@@ -41,7 +39,6 @@ impl Stack {
     }
 
     /// Dépile et renvoie le haut. Erreur si la pile est vide.
-    // Boucle : 4. FAIRE. Prend un argument ; source de StackUnderflow.
     #[inline]
     pub fn pop(&mut self) -> Result<Word> {
         self.items.pop().ok_or(VmError::StackUnderflow {
@@ -52,7 +49,6 @@ impl Stack {
 
     /// Vérifie qu'il y a au moins `n` éléments, pour signaler un underflow précis
     /// (« needed 2, had 1 ») avant de dépiler quoi que ce soit.
-    // Boucle : 4. FAIRE, juste avant de dépiler plusieurs arguments ; source de StackUnderflow.
     #[inline]
     pub fn require(&self, n: usize) -> Result<()> {
         let len = self.items.len();
@@ -66,7 +62,6 @@ impl Stack {
     }
 
     /// Regarde sans dépiler. `depth = 0` est le haut, 1 l'élément juste en dessous, etc.
-    // Boucle : hors boucle pour l'instant (tests, futur mode trace).
     pub fn peek(&self, depth: usize) -> Result<&Word> {
         let len = self.items.len();
         if depth >= len {
@@ -79,7 +74,6 @@ impl Stack {
     }
 
     /// DUPn : copie le n-ième élément en partant du haut (DUP1 = le haut) et l'empile.
-    // Boucle : 4. FAIRE, pour DUP1..DUP16.
     pub fn dup(&mut self, n: usize) -> Result<()> {
         let len = self.items.len();
         if n == 0 || len < n {
@@ -94,7 +88,6 @@ impl Stack {
 
     /// SWAPn : échange le haut avec l'élément situé n places en dessous
     /// (SWAP1 échange les deux premiers).
-    // Boucle : 4. FAIRE, pour SWAP1..SWAP16.
     pub fn swap(&mut self, n: usize) -> Result<()> {
         let len = self.items.len();
         if n == 0 || len < n + 1 {

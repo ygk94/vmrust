@@ -49,7 +49,6 @@ pub enum Opcode {
 
 impl Opcode {
     /// Décode un octet de bytecode. Seule source de `InvalidOpcode`.
-    // Boucle : 2. COMPRENDRE. Traduit l'octet lu en instruction ; source de InvalidOpcode.
     pub fn from_byte(byte: u8) -> Result<Opcode> {
         Ok(match byte {
             0x00 => Opcode::Stop,
@@ -87,7 +86,6 @@ impl Opcode {
     }
 
     /// L'octet qui encode cet opcode (inverse de `from_byte`).
-    // Boucle : AVANT. Sert à l'analyse des JUMPDEST et aux tests, pas pendant les tours.
     pub fn to_byte(self) -> u8 {
         match self {
             Opcode::Stop => 0x00,
@@ -125,7 +123,6 @@ impl Opcode {
 
     /// Nombre d'octets occupés dans le bytecode : l'opcode + ses données éventuelles.
     /// C'est ce dont le program counter avance après l'instruction.
-    // Boucle : 5. AVANCER. Dit de combien d'octets le doigt doit descendre.
     #[inline]
     pub fn size(self) -> usize {
         match self {
@@ -136,7 +133,6 @@ impl Opcode {
 }
 
 /// Nom lisible façon assembleur EVM : `ADD`, `PUSH1`, `DUP16`...
-// Boucle : hors boucle. Uniquement pour afficher (logs, tests).
 impl fmt::Display for Opcode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {

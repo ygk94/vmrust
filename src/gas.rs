@@ -26,7 +26,6 @@ pub const MEMORY_WORD: u64 = 3;
 pub const MEMORY_QUADRATIC_DIVISOR: u64 = 512;
 
 /// Coût fixe de l'opcode, payé avant son exécution.
-// Boucle : 3. PAYER. Donne le prix fixe de l'instruction, à chaque tour.
 #[inline]
 pub fn static_cost(op: Opcode) -> Gas {
     Gas::new(match op {
@@ -59,7 +58,6 @@ pub fn static_cost(op: Opcode) -> Gas {
 ///
 /// Linéaire au début, quadratique ensuite : c'est ce qui rend les grosses mémoires
 /// hors de prix. Saturant pour ne jamais déborder sur des tailles absurdes.
-// Boucle : 3. PAYER, en plus, pendant les instructions mémoire.
 pub fn memory_cost(words: u64) -> u64 {
     MEMORY_WORD
         .saturating_mul(words)
@@ -67,7 +65,6 @@ pub fn memory_cost(words: u64) -> u64 {
 }
 
 /// Ce qu'il faut payer pour passer de `old_words` à `new_words`. 0 si pas d'agrandissement.
-// Boucle : 3. PAYER, en plus, quand une instruction agrandit la mémoire.
 pub fn memory_expansion_cost(old_words: u64, new_words: u64) -> Gas {
     if new_words <= old_words {
         return Gas::new(0);

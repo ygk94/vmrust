@@ -3,19 +3,10 @@
 //! `Vm::run` répète `step` jusqu'à STOP, RETURN, REVERT ou une erreur.
 //! Une erreur (`Err(VmError)`) est un arrêt exceptionnel : tout le gas est perdu.
 //! REVERT n'est PAS une erreur : c'est un résultat normal (`ExecutionOutcome::Revert`).
-//!
-//! Dans tout le projet, les commentaires `// Boucle : ...` disent où chaque fonction agit :
-//! - AVANT : préparation, une seule fois avant le premier tour ;
-//! - 1. LIRE (fetch) : prendre l'octet sous le doigt (le pc) ;
-//! - 2. COMPRENDRE (decode) : traduire l'octet en instruction ;
-//! - 3. PAYER : retirer le gas ;
-//! - 4. FAIRE (execute) : exécuter l'instruction avec du code Rust ;
-//! - 5. AVANCER : déplacer le doigt ;
-//! - FIN : fabriquer le résultat.
 
 use crate::error::{Result, VmError};
 use crate::gas;
-use crate::memory::Memory;
+use crate::memory::{Memory, WORD_SIZE};
 use crate::opcode::Opcode;
 use crate::stack::Stack;
 use crate::types::{Gas, ProgramCounter, Word};
@@ -50,7 +41,6 @@ pub struct Vm<'a> {
 }
 
 impl<'a> Vm<'a> {
-    // Boucle : AVANT. Prépare tout : doigt à 0, pile et mémoire vides, gas plein, JUMPDEST analysés.
     pub fn new(code: &'a [u8], gas_limit: Gas) -> Self {
         Vm {
             code,
@@ -64,7 +54,6 @@ impl<'a> Vm<'a> {
     }
 
     /// Exécute jusqu'au bout.
-    // Boucle : C'EST la boucle : répète step() jusqu'à la fin ou une erreur.
     pub fn run(&mut self) -> Result<ExecutionOutcome> {
         loop {
             match self.step()? {
@@ -92,7 +81,6 @@ impl<'a> Vm<'a> {
         self.gas_limit.value() - self.gas.value()
     }
 
-    // Boucle : FIN. Fabrique le résultat après STOP ou RETURN.
     fn success(&self, return_data: Vec<u8>) -> ExecutionOutcome {
         ExecutionOutcome::Success {
             return_data,
@@ -100,7 +88,6 @@ impl<'a> Vm<'a> {
         }
     }
 
-    // Boucle : FIN. Fabrique le résultat après REVERT.
     fn revert(&self, return_data: Vec<u8>) -> ExecutionOutcome {
         ExecutionOutcome::Revert {
             return_data,
@@ -109,19 +96,14 @@ impl<'a> Vm<'a> {
     }
 
     /// Exécute UNE instruction : fetch, decode, facturation du gas, execute.
-    // Boucle : UN tour complet : 1. LIRE, 2. COMPRENDRE, 3. PAYER, 4. FAIRE, 5. AVANCER.
     fn step(&mut self) -> Result<Control> {
-        // 1. LIRE (fetch) : l'octet sous le doigt. Plus d'octet = fin du code = STOP.
+        // Fin du code = STOP implicite.
         let Some(&byte) = self.code.get(self.pc.get()) else {
             return Ok(Control::Stop);
         };
-        // 2. COMPRENDRE (decode) : octet -> instruction. Erreur possible : InvalidOpcode.
         let op = Opcode::from_byte(byte)?;
-        // 3. PAYER : le prix fixe, avant d'agir. Erreur possible : OutOfGas.
         self.gas.charge(gas::static_cost(op))?;
 
-        // 4. FAIRE (execute) : le code Rust qui correspond à l'instruction.
-        // Erreurs possibles : StackUnderflow, StackOverflow, InvalidJump, InvalidMemoryOffset, OutOfGas.
         match op {
             Opcode::Stop => return Ok(Control::Stop),
 
@@ -173,8 +155,7 @@ impl<'a> Vm<'a> {
                 let offset = to_usize(self.stack.pop()?)?;
                 let value = self.stack.pop()?;
                 self.charge_memory(offset, 1)?;
-                // Seul l'octet de poids faible est écrit.
-                self.memory.store_byte(offset, value.byte(0));
+                self.memory.store_byte(offset, value.byte(0)); // octet de poids faible
             }
             Opcode::MSize => self.stack.push(Word::from(self.memory.size()))?,
 
@@ -200,8 +181,7 @@ impl<'a> Vm<'a> {
             Opcode::Jump => {
                 let destination = self.stack.pop()?;
                 self.jump(destination)?;
-                // Le pc est déjà placé : surtout pas de pc.advance().
-                return Ok(Control::Continue);
+                return Ok(Control::Continue); // pc déjà placé : pas de advance()
             }
             Opcode::JumpI => {
                 self.stack.require(2)?;
@@ -212,23 +192,20 @@ impl<'a> Vm<'a> {
                     return Ok(Control::Continue);
                 }
             }
-            // Simple marqueur : ne fait rien à l'exécution.
             Opcode::JumpDest => {}
 
             Opcode::Invalid => return Err(VmError::InvalidOpcode(byte)),
         }
 
-        // 5. AVANCER : le doigt passe à l'instruction suivante (sauf après un saut, déjà fait).
         self.pc.advance(op.size());
         Ok(Control::Continue)
     }
 
     /// Place le pc sur `destination` si c'est un JUMPDEST valide, sinon `InvalidJump`.
-    // Boucle : 4. FAIRE, pour JUMP et JUMPI ; source de InvalidJump.
     fn jump(&mut self, destination: Word) -> Result<()> {
         // Une destination qui ne tient pas dans un usize est forcément hors du code.
         let destination = usize::try_from(destination).unwrap_or(usize::MAX);
-        if !self.jumpdests.get(destination).copied().unwrap_or(false) {
+        if self.jumpdests.get(destination) != Some(&true) {
             return Err(VmError::InvalidJump(destination));
         }
         self.pc.jump_to(destination);
@@ -237,12 +214,11 @@ impl<'a> Vm<'a> {
 
     /// Facture l'agrandissement mémoire nécessaire pour couvrir `[offset, offset + len)`.
     /// Appelé AVANT de toucher la mémoire : si le gas manque, rien n'est alloué.
-    // Boucle : 3. PAYER, en plus, au début des instructions mémoire ; source de OutOfGas.
     fn charge_memory(&mut self, offset: usize, len: usize) -> Result<()> {
         let new_size = Memory::required_size(offset, len)?;
         if new_size > self.memory.size() {
             let old_words = self.memory.size_in_words() as u64;
-            let new_words = (new_size / 32) as u64;
+            let new_words = (new_size / WORD_SIZE) as u64;
             self.gas
                 .charge(gas::memory_expansion_cost(old_words, new_words))?;
         }
@@ -250,7 +226,6 @@ impl<'a> Vm<'a> {
     }
 
     /// Dépile `a` (le haut) puis `b`, empile `f(a, b)`.
-    // Boucle : 4. FAIRE, pour toutes les opérations à 2 arguments (ADD, SUB, LT, AND...).
     #[inline]
     fn binary_op(&mut self, f: impl FnOnce(Word, Word) -> Word) -> Result<()> {
         self.stack.require(2)?;
@@ -260,7 +235,6 @@ impl<'a> Vm<'a> {
     }
 
     /// Dépile `a`, empile `f(a)`.
-    // Boucle : 4. FAIRE, pour les opérations à 1 argument (ISZERO, NOT).
     #[inline]
     fn unary_op(&mut self, f: impl FnOnce(Word) -> Word) -> Result<()> {
         let a = self.stack.pop()?;
@@ -270,10 +244,8 @@ impl<'a> Vm<'a> {
     /// Lit les `n` octets qui suivent l'opcode PUSH courant, en big-endian.
     /// Si le code s'arrête avant, les octets manquants valent 0 (à droite).
     ///
-    /// Optimisation (vue au flamegraph) : `copy_from_slice` sur une longueur variable
-    /// appelait `memcpy` à chaque PUSH, environ 9 % du temps. Les PUSH1 à PUSH8, de loin
-    /// les plus fréquents, sont maintenant assemblés directement dans un `u64`.
-    // Boucle : 4. FAIRE, pour PUSH : lit la donnée placée juste après l'octet.
+    /// PUSH1 à PUSH8 sont assemblés dans un `u64` : un `copy_from_slice` de longueur
+    /// variable appelait `memcpy` à chaque PUSH (~9 % du temps au flamegraph).
     #[inline]
     fn read_push_data(&self, n: usize) -> Word {
         let start = (self.pc.get() + 1).min(self.code.len());
@@ -301,7 +273,6 @@ impl<'a> Vm<'a> {
 ///
 /// Un octet 0x5b situé dans les données d'un PUSH n'est PAS une destination valide :
 /// sinon on pourrait sauter au milieu d'une donnée et l'exécuter comme du code.
-// Boucle : AVANT. Parcourt le code une fois pour noter les lignes où l'on a le droit de sauter.
 fn analyze_jumpdests(code: &[u8]) -> Vec<bool> {
     let mut valid = vec![false; code.len()];
     let mut i = 0;
@@ -319,16 +290,14 @@ fn analyze_jumpdests(code: &[u8]) -> Vec<bool> {
 
 /// Convertit un mot venant de la pile en offset/taille utilisable.
 /// Jamais de `as` : un mot trop grand est une erreur, pas une troncature silencieuse.
-// Boucle : 4. FAIRE. Transforme un nombre de la pile en adresse mémoire ; source de InvalidMemoryOffset.
 fn to_usize(word: Word) -> Result<usize> {
     usize::try_from(word).map_err(|_| VmError::InvalidMemoryOffset)
 }
 
 /// Les booléens EVM sont des mots : 1 pour vrai, 0 pour faux.
-// Boucle : 4. FAIRE, pour LT, GT, EQ, ISZERO (vrai = 1, faux = 0).
 #[inline]
 fn bool_word(b: bool) -> Word {
-    if b { Word::from(1u8) } else { Word::ZERO }
+    Word::from(u8::from(b))
 }
 
 #[cfg(test)]

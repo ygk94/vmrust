@@ -25,7 +25,6 @@ impl Gas {
 
     /// Facture `cost` sur le gas restant. Renvoie `OutOfGas` sans rien modifier
     /// si le gas restant ne suffit pas.
-    // Boucle : 3. PAYER. Appelée à chaque tour pour retirer le prix de l'instruction.
     pub fn charge(&mut self, cost: Gas) -> Result<()> {
         if cost.0 > self.0 {
             return Err(VmError::OutOfGas {
@@ -43,20 +42,17 @@ impl Gas {
 pub struct ProgramCounter(usize);
 
 impl ProgramCounter {
-    // Boucle : 1. LIRE. Donne la position de l'octet à lire.
     pub fn get(self) -> usize {
         self.0
     }
 
     /// Avance de `n` octets : 1 pour un opcode normal, 1 + n pour un PUSHn.
-    // Boucle : 5. AVANCER. Descend le doigt après une instruction normale.
     pub fn advance(&mut self, n: usize) {
         self.0 += n;
     }
 
     /// Place le pc sur `destination` (JUMP, JUMPI). La validité de la destination
     /// est vérifiée par l'interpréteur.
-    // Boucle : 4. FAIRE, pour JUMP et JUMPI. Le doigt saute au lieu de descendre.
     pub fn jump_to(&mut self, destination: usize) {
         self.0 = destination;
     }
@@ -67,7 +63,6 @@ impl ProgramCounter {
 pub struct Address([u8; 20]);
 
 /// Sur la pile, une adresse est un mot aligné à droite : on garde les 20 derniers octets.
-// Boucle : pas encore utilisé (servira pour CALLER et le storage).
 impl From<Word> for Address {
     fn from(word: Word) -> Self {
         let bytes: [u8; 32] = word.to_be_bytes();

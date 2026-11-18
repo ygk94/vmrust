@@ -1,5 +1,4 @@
 //! Tests d'intégration : des programmes complets, vus de l'extérieur de la crate.
-//! Ce sont les exemples du chapitre 9 de GUIDE_VM.md.
 
 use vmrust::error::{Result, VmError};
 use vmrust::interpreter::{ExecutionOutcome, Vm};
