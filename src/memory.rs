@@ -82,7 +82,7 @@ impl Memory {
         Word::from_be_slice(&self.data[offset..offset + WORD_SIZE])
     }
 
-    /// Écrit 32 octets à partir de `offset`, en big-endian (MSTORE).
+    /// Écrit 32 octet à partir de `offset`, en big-endian (MSTORE).
     // Boucle : 4. FAIRE, pour MSTORE.
     pub fn store_word(&mut self, offset: usize, value: Word) {
         self.expand(offset, WORD_SIZE);
