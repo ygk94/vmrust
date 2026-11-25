@@ -2280,6 +2280,7 @@ dependencies = [
  "thiserror",
  "tiny-keccak",
  "tokio",
+ "tower",
 ]
 
 [[package]]

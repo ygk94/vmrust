@@ -4,12 +4,17 @@
 //! Une erreur (`Err(VmError)`) est un arrêt exceptionnel : tout le gas est perdu.
 //! REVERT n'est PAS une erreur : c'est un résultat normal (`ExecutionOutcome::Revert`).
 
+use std::collections::HashMap;
+
+use tiny_keccak::{Hasher, Keccak};
+
 use crate::error::{Result, VmError};
 use crate::gas;
 use crate::memory::{Memory, WORD_SIZE};
 use crate::opcode::Opcode;
 use crate::stack::Stack;
-use crate::types::{Gas, ProgramCounter, Word};
+use crate::state::{InMemoryState, StateBackend};
+use crate::types::{Address, Gas, ProgramCounter, Word};
 
 /// Résultat d'une exécution qui s'est terminée proprement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +33,7 @@ enum Control {
     Revert(Vec<u8>),
 }
 
-pub struct Vm<'a> {
+pub struct Vm<'a, S: StateBackend = InMemoryState> {
     code: &'a [u8],
     pc: ProgramCounter,
     stack: Stack,
@@ -38,10 +43,37 @@ pub struct Vm<'a> {
     gas_limit: Gas,
     /// `jumpdests[i] == true` si `code[i]` est un JUMPDEST qui n'est pas une donnée de PUSH.
     jumpdests: Vec<bool>,
+    state: S,
+    /// Écritures de storage en attente : appliquées à `state` en cas de succès, jetées sinon.
+    journal: HashMap<Word, Word>,
+    /// Contrat exécuté : c'est son storage qu'on lit et écrit.
+    address: Address,
+    caller: Address,
 }
 
 impl<'a> Vm<'a> {
+    /// VM sur un état vierge, avec des adresses nulles.
     pub fn new(code: &'a [u8], gas_limit: Gas) -> Self {
+        Vm::with_state(
+            code,
+            gas_limit,
+            InMemoryState::default(),
+            Address::default(),
+            Address::default(),
+        )
+    }
+}
+
+impl<'a, S: StateBackend> Vm<'a, S> {
+    /// VM exécutant `code` comme le contrat `address`, appelé par `caller`.
+    /// Pour garder l'état après l'exécution, passer `&mut state`.
+    pub fn with_state(
+        code: &'a [u8],
+        gas_limit: Gas,
+        state: S,
+        address: Address,
+        caller: Address,
+    ) -> Self {
         Vm {
             code,
             pc: ProgramCounter::default(),
@@ -50,19 +82,50 @@ impl<'a> Vm<'a> {
             gas: gas_limit,
             gas_limit,
             jumpdests: analyze_jumpdests(code),
+            state,
+            journal: HashMap::new(),
+            address,
+            caller,
         }
     }
 
     /// Exécute jusqu'au bout.
     pub fn run(&mut self) -> Result<ExecutionOutcome> {
+        self.run_with(|_| {})
+    }
+
+    /// Comme `run`, en appelant `observe` avant chaque instruction (mode trace).
+    pub fn run_with(&mut self, mut observe: impl FnMut(&Self)) -> Result<ExecutionOutcome> {
         loop {
-            match self.step()? {
-                Control::Continue => {}
-                Control::Stop => return Ok(self.success(Vec::new())),
-                Control::Return(data) => return Ok(self.success(data)),
-                Control::Revert(data) => return Ok(self.revert(data)),
+            observe(self);
+            match self.step() {
+                Ok(Control::Continue) => {}
+                Ok(Control::Stop) => return Ok(self.success(Vec::new())),
+                Ok(Control::Return(data)) => return Ok(self.success(data)),
+                Ok(Control::Revert(data)) => return Ok(self.revert(data)),
+                Err(error) => {
+                    // Arrêt exceptionnel : écritures annulées, tout le gas est perdu.
+                    self.journal.clear();
+                    self.gas = Gas::new(0);
+                    return Err(error);
+                }
             }
         }
+    }
+
+    pub fn pc(&self) -> usize {
+        self.pc.get()
+    }
+
+    /// L'instruction sur le point d'être exécutée, `None` en fin de code ou si l'octet
+    /// est inconnu.
+    pub fn current_opcode(&self) -> Option<Opcode> {
+        let &byte = self.code.get(self.pc.get())?;
+        Opcode::from_byte(byte).ok()
+    }
+
+    pub fn state(&self) -> &S {
+        &self.state
     }
 
     pub fn stack(&self) -> &Stack {
@@ -81,14 +144,18 @@ impl<'a> Vm<'a> {
         self.gas_limit.value() - self.gas.value()
     }
 
-    fn success(&self, return_data: Vec<u8>) -> ExecutionOutcome {
+    fn success(&mut self, return_data: Vec<u8>) -> ExecutionOutcome {
+        for (key, value) in self.journal.drain() {
+            self.state.sstore(&self.address, key, value);
+        }
         ExecutionOutcome::Success {
             return_data,
             gas_used: self.gas_used(),
         }
     }
 
-    fn revert(&self, return_data: Vec<u8>) -> ExecutionOutcome {
+    fn revert(&mut self, return_data: Vec<u8>) -> ExecutionOutcome {
+        self.journal.clear();
         ExecutionOutcome::Revert {
             return_data,
             gas_used: self.gas_used(),
@@ -114,6 +181,14 @@ impl<'a> Vm<'a> {
             Opcode::Div => self.binary_op(|a, b| a.checked_div(b).unwrap_or(Word::ZERO))?,
             Opcode::Mod => self.binary_op(|a, b| a.checked_rem(b).unwrap_or(Word::ZERO))?,
 
+            Opcode::Exp => {
+                self.stack.require(2)?;
+                let base = self.stack.pop()?;
+                let exponent = self.stack.pop()?;
+                self.gas.charge(gas::exp_cost(exponent))?;
+                self.stack.push(base.wrapping_pow(exponent))?;
+            }
+
             Opcode::Lt => self.binary_op(|a, b| bool_word(a < b))?,
             Opcode::Gt => self.binary_op(|a, b| bool_word(a > b))?,
             Opcode::Eq => self.binary_op(|a, b| bool_word(a == b))?,
@@ -122,6 +197,27 @@ impl<'a> Vm<'a> {
             Opcode::Or => self.binary_op(|a, b| a | b)?,
             Opcode::Xor => self.binary_op(|a, b| a ^ b)?,
             Opcode::Not => self.unary_op(|a| !a)?,
+            // Le décalage est en haut de la pile. À partir de 256, il ne reste que des 0.
+            Opcode::Shl => self.binary_op(|shift, value| {
+                usize::try_from(shift).map_or(Word::ZERO, |n| value << n)
+            })?,
+            Opcode::Shr => self.binary_op(|shift, value| {
+                usize::try_from(shift).map_or(Word::ZERO, |n| value >> n)
+            })?,
+
+            Opcode::Keccak256 => {
+                // Facturé AVANT de lire et de hasher.
+                self.stack.require(2)?;
+                let size = to_usize(*self.stack.peek(1)?)?;
+                self.gas.charge(gas::keccak_cost(size))?;
+                let data = self.pop_memory_range()?;
+                let mut hash = [0u8; 32];
+                let mut hasher = Keccak::v256();
+                hasher.update(&data);
+                hasher.finalize(&mut hash);
+                self.stack.push(Word::from_be_bytes(hash))?;
+            }
+            Opcode::Caller => self.stack.push(self.caller.into())?,
 
             Opcode::Pop => {
                 self.stack.pop()?;
@@ -159,18 +255,22 @@ impl<'a> Vm<'a> {
             }
             Opcode::MSize => self.stack.push(Word::from(self.memory.size()))?,
 
-            Opcode::Return | Opcode::Revert => {
+            Opcode::SLoad => {
+                let key = self.stack.pop()?;
+                let value = self.storage(key);
+                self.stack.push(value)?;
+            }
+            Opcode::SStore => {
                 self.stack.require(2)?;
-                let offset = self.stack.pop()?;
-                let size = to_usize(self.stack.pop()?)?;
-                // Taille 0 : rien à lire, l'offset est ignoré (même s'il est énorme).
-                let data = if size == 0 {
-                    Vec::new()
-                } else {
-                    let offset = to_usize(offset)?;
-                    self.charge_memory(offset, size)?;
-                    self.memory.read(offset, size)
-                };
+                let key = self.stack.pop()?;
+                let value = self.stack.pop()?;
+                let cost = gas::sstore_cost(self.storage(key), value);
+                self.gas.charge(cost)?;
+                self.journal.insert(key, value);
+            }
+
+            Opcode::Return | Opcode::Revert => {
+                let data = self.pop_memory_range()?;
                 return Ok(if op == Opcode::Return {
                     Control::Return(data)
                 } else {
@@ -199,6 +299,28 @@ impl<'a> Vm<'a> {
 
         self.pc.advance(op.size());
         Ok(Control::Continue)
+    }
+
+    /// Valeur d'une case de storage, écritures en attente comprises.
+    fn storage(&self, key: Word) -> Word {
+        self.journal
+            .get(&key)
+            .copied()
+            .unwrap_or_else(|| self.state.sload(&self.address, key))
+    }
+
+    /// Dépile un offset puis une taille et lit cette zone, agrandissement facturé.
+    fn pop_memory_range(&mut self) -> Result<Vec<u8>> {
+        self.stack.require(2)?;
+        let offset = self.stack.pop()?;
+        let size = to_usize(self.stack.pop()?)?;
+        // Taille 0 : rien à lire, l'offset est ignoré (même s'il est énorme).
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let offset = to_usize(offset)?;
+        self.charge_memory(offset, size)?;
+        Ok(self.memory.read(offset, size))
     }
 
     /// Place le pc sur `destination` si c'est un JUMPDEST valide, sinon `InvalidJump`.
@@ -668,5 +790,153 @@ mod tests {
             run(&code).unwrap_err(),
             VmError::StackOverflow { limit: 1024 }
         );
+    }
+
+    #[test]
+    fn exp_wraps_and_charges_per_exponent_byte() {
+        // PUSH1 10, PUSH1 2, EXP  ->  2 ^ 10
+        assert_eq!(final_stack(&code("600a60020a")), vec![w(1024)]);
+        // 2 ^ 256 = 0 (modulo 2^256) : exposant sur 2 octets, 3+3+10+100 gas
+        assert_eq!(final_stack(&code("61010060020a")), vec![w(0)]);
+        assert_eq!(
+            run(&code("61010060020a")).unwrap(),
+            ExecutionOutcome::Success {
+                return_data: vec![],
+                gas_used: 116
+            }
+        );
+        // 0 ^ 0 = 1
+        assert_eq!(final_stack(&code("5f5f0a")), vec![w(1)]);
+    }
+
+    #[test]
+    fn shifts_take_the_amount_on_top() {
+        assert_eq!(final_stack(&code("600160041b")), vec![w(16)]);
+        assert_eq!(final_stack(&code("601060041c")), vec![w(1)]);
+        // Décalage de 256, puis décalage qui ne tient pas dans un usize
+        assert_eq!(final_stack(&code("60016101001b")), vec![w(0)]);
+        assert_eq!(final_stack(&code("60016101001c")), vec![w(0)]);
+        assert_eq!(final_stack(&code("60015f191b")), vec![w(0)]);
+        assert_eq!(final_stack(&code("60015f191c")), vec![w(0)]);
+    }
+
+    #[test]
+    fn keccak256_matches_known_hashes() {
+        let word = |h: &str| Word::from_be_slice(&code(h));
+        // Entrée vide, même à un offset énorme : PUSH0, PUSH0, NOT, KECCAK256
+        assert_eq!(
+            final_stack(&code("5f5f1920")),
+            vec![word(
+                "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"
+            )]
+        );
+        // "abc" : PUSH3, PUSH1 232, SHL, PUSH0, MSTORE, PUSH1 3, PUSH0, KECCAK256
+        assert_eq!(
+            final_stack(&code("6261626360e81b5f5260035f20")),
+            vec![word(
+                "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45"
+            )]
+        );
+    }
+
+    #[test]
+    fn keccak256_gas_is_30_plus_6_per_word_plus_memory() {
+        // PUSH1 33, PUSH0, KECCAK256 : 3 + 2 + 30 + 2*6 + 2*3
+        assert_eq!(
+            run(&code("60215f20")).unwrap(),
+            ExecutionOutcome::Success {
+                return_data: vec![],
+                gas_used: 53
+            }
+        );
+        assert_eq!(
+            run(&code("5f20")).unwrap_err(),
+            VmError::StackUnderflow {
+                needed: 2,
+                available: 1
+            }
+        );
+    }
+
+    /// Exécute sur `state`, à l'adresse nulle.
+    fn run_on(state: &mut InMemoryState, hex_str: &str, gas: u64) -> Result<ExecutionOutcome> {
+        let c = code(hex_str);
+        let zero = Address::default();
+        Vm::with_state(&c, Gas::new(gas), state, zero, zero).run()
+    }
+
+    #[test]
+    fn caller_is_pushed_as_a_word() {
+        let caller = Address::from(w(0xbeef));
+        let state = InMemoryState::default();
+        let mut vm = Vm::with_state(&[0x33], Gas::new(2), state, Address::default(), caller);
+        vm.run().unwrap();
+        assert_eq!(vm.stack().as_slice(), &[w(0xbeef)]);
+    }
+
+    #[test]
+    fn sload_sees_pending_writes() {
+        // PUSH1 42, PUSH1 1, SSTORE, PUSH1 1, SLOAD
+        let c = code("602a600155600154");
+        let mut vm = Vm::new(&c, Gas::new(GAS));
+        assert_eq!(
+            vm.run().unwrap(),
+            ExecutionOutcome::Success {
+                return_data: vec![],
+                gas_used: 3 + 3 + 20_000 + 3 + 2_100
+            }
+        );
+        assert_eq!(vm.stack().as_slice(), &[w(42)]);
+        assert_eq!(vm.state().sload(&Address::default(), w(1)), w(42));
+    }
+
+    #[test]
+    fn second_sstore_pays_the_reset_price() {
+        // Deux fois PUSH1 1, PUSH0, SSTORE
+        assert_eq!(
+            run(&code("60015f5560015f55")).unwrap(),
+            ExecutionOutcome::Success {
+                return_data: vec![],
+                gas_used: 5 + 20_000 + 5 + 5_000
+            }
+        );
+    }
+
+    #[test]
+    fn storage_is_kept_on_success_only() {
+        let mut state = InMemoryState::default();
+        run_on(&mut state, "60075f55", GAS).unwrap();
+        let saved = state.clone();
+        assert_eq!(state.sload(&Address::default(), w(0)), w(7));
+
+        // Écrit 9 puis REVERT
+        let outcome = run_on(&mut state, "60095f555f5ffd", GAS).unwrap();
+        assert!(matches!(outcome, ExecutionOutcome::Revert { .. }));
+        assert_eq!(state, saved);
+        // Écrit 9 puis INVALID
+        run_on(&mut state, "60095f55fe", GAS).unwrap_err();
+        assert_eq!(state, saved);
+        // Écrit 9 puis boucle jusqu'à épuiser le gas : PUSH1 9, PUSH0, SSTORE,
+        // JUMPDEST, PUSH1 4, JUMP
+        let err = run_on(&mut state, "60095f555b600456", 6_000).unwrap_err();
+        assert!(matches!(err, VmError::OutOfGas { .. }));
+        assert_eq!(state, saved);
+    }
+
+    #[test]
+    fn an_error_burns_all_the_gas() {
+        let mut vm = Vm::new(&[0xfe], Gas::new(GAS));
+        vm.run().unwrap_err();
+        assert_eq!(vm.gas_remaining(), Gas::new(0));
+    }
+
+    #[test]
+    fn run_with_observes_every_instruction() {
+        let mut seen = Vec::new();
+        Vm::new(&code("600260030100"), Gas::new(GAS))
+            .run_with(|vm| seen.push((vm.pc(), vm.current_opcode().unwrap().to_string())))
+            .unwrap();
+        let names: Vec<_> = seen.iter().map(|(pc, n)| (*pc, n.as_str())).collect();
+        assert_eq!(names, [(0, "PUSH1"), (2, "PUSH1"), (4, "ADD"), (5, "STOP")]);
     }
 }
