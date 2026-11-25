@@ -27,11 +27,13 @@ fn round_up_to_word(n: usize) -> usize {
 }
 
 impl Memory {
+    // Boucle : AVANT. Mémoire vide créée au démarrage de la VM.
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Taille actuelle en octets (multiple de 32).
+    // Boucle : 4. FAIRE (MSIZE) et 3. PAYER (comparer avec la taille voulue).
     pub fn size(&self) -> usize {
         self.data.len()
     }
@@ -47,6 +49,7 @@ impl Memory {
     ///
     /// Erreur si la zone déborde ou dépasse `MEMORY_LIMIT`. C'est l'interpréteur qui
     /// appelle ça pour facturer le gas avant tout agrandissement.
+    // Boucle : 3. PAYER. Calcule la taille voulue avant de facturer ; source de InvalidMemoryOffset.
     pub fn required_size(offset: usize, len: usize) -> Result<usize> {
         if len == 0 {
             return Ok(0);
@@ -63,6 +66,7 @@ impl Memory {
     ///
     /// Panique si la zone dépasse `MEMORY_LIMIT` : l'appelant doit l'avoir validée
     /// avec `required_size` avant.
+    // Boucle : 4. FAIRE. Agrandit la mémoire, une fois le gas payé.
     pub fn expand(&mut self, offset: usize, len: usize) {
         let needed =
             Self::required_size(offset, len).expect("zone mémoire non validée par required_size");
@@ -72,24 +76,28 @@ impl Memory {
     }
 
     /// Lit 32 octets à partir de `offset`, en big-endian (MLOAD).
+    // Boucle : 4. FAIRE, pour MLOAD.
     pub fn load_word(&mut self, offset: usize) -> Word {
         self.expand(offset, WORD_SIZE);
         Word::from_be_slice(&self.data[offset..offset + WORD_SIZE])
     }
 
     /// Écrit 32 octets à partir de `offset`, en big-endian (MSTORE).
+    // Boucle : 4. FAIRE, pour MSTORE.
     pub fn store_word(&mut self, offset: usize, value: Word) {
         self.expand(offset, WORD_SIZE);
         self.data[offset..offset + WORD_SIZE].copy_from_slice(&value.to_be_bytes::<WORD_SIZE>());
     }
 
     /// Écrit un seul octet (MSTORE8).
+    // Boucle : 4. FAIRE, pour MSTORE8.
     pub fn store_byte(&mut self, offset: usize, value: u8) {
         self.expand(offset, 1);
         self.data[offset] = value;
     }
 
     /// Copie de `[offset, offset + len)` (RETURN, REVERT). Vide si `len == 0`.
+    // Boucle : FIN. Récupère les données renvoyées par RETURN ou REVERT.
     pub fn read(&mut self, offset: usize, len: usize) -> Vec<u8> {
         if len == 0 {
             return Vec::new();
