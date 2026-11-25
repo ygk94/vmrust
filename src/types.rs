@@ -1,6 +1,7 @@
 //! Types du domaine : mots de 256 bits, gas, adresses, compteur de programme.
 
 use std::fmt;
+use std::str::FromStr;
 
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,24 @@ impl From<Word> for Address {
     }
 }
 
+/// L'inverse : complète par 12 octets de zéros à gauche (opcode CALLER).
+impl From<Address> for Word {
+    fn from(address: Address) -> Self {
+        Word::from_be_slice(&address.0)
+    }
+}
+
+/// Lit 40 caractères hexadécimaux, avec ou sans `0x`.
+impl FromStr for Address {
+    type Err = hex::FromHexError;
+
+    fn from_str(text: &str) -> std::result::Result<Self, Self::Err> {
+        let mut bytes = [0u8; 20];
+        hex::decode_to_slice(text.strip_prefix("0x").unwrap_or(text), &mut bytes)?;
+        Ok(Address(bytes))
+    }
+}
+
 /// Affiche l'adresse au format `0x` + 40 caractères hexadécimaux.
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -111,6 +130,18 @@ mod tests {
         assert_eq!(pc.get(), 2);
         pc.jump_to(10);
         assert_eq!(pc.get(), 10);
+    }
+
+    #[test]
+    fn address_parses_displays_and_converts_back_to_a_word() {
+        let text = "0x000000000000000000000000000000000000abcd";
+        let address: Address = text.parse().unwrap();
+        assert_eq!(address.to_string(), text);
+        assert_eq!(
+            <Address as Into<Word>>::into(address),
+            Word::from(0xabcdu64)
+        );
+        assert!("0x12".parse::<Address>().is_err());
     }
 
     #[test]

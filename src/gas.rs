@@ -4,13 +4,13 @@
 //! Valeurs reprises de l'EVM (paliers du Yellow Paper).
 
 use crate::opcode::Opcode;
-use crate::types::Gas;
+use crate::types::{Gas, Word};
 
-/// STOP, RETURN, REVERT, INVALID.
+/// STOP, RETURN, REVERT, INVALID, et SSTORE (dont le coût est entièrement dynamique).
 pub const ZERO: u64 = 0;
 /// JUMPDEST.
 pub const JUMPDEST: u64 = 1;
-/// POP, PC, MSIZE, GAS, PUSH0.
+/// POP, PC, MSIZE, GAS, CALLER, PUSH0.
 pub const BASE: u64 = 2;
 /// ADD, SUB, comparaisons, bits, PUSH1-32, DUP, SWAP, MLOAD, MSTORE, MSTORE8.
 pub const VERY_LOW: u64 = 3;
@@ -18,8 +18,20 @@ pub const VERY_LOW: u64 = 3;
 pub const LOW: u64 = 5;
 /// JUMP.
 pub const MID: u64 = 8;
-/// JUMPI.
+/// JUMPI, et partie fixe de EXP.
 pub const HIGH: u64 = 10;
+/// EXP, par octet significatif de l'exposant.
+pub const EXP_BYTE: u64 = 50;
+/// KECCAK256, partie fixe.
+pub const KECCAK_BASE: u64 = 30;
+/// KECCAK256, par mot de 32 octets hashé.
+pub const KECCAK_WORD: u64 = 6;
+/// SLOAD (simplifié : pas de distinction accès froid / chaud).
+pub const SLOAD: u64 = 2_100;
+/// SSTORE qui remplit une case vide.
+pub const SSTORE_SET: u64 = 20_000;
+/// Tout autre SSTORE (simplifié : pas de remboursement).
+pub const SSTORE_RESET: u64 = 5_000;
 /// Partie linéaire du coût mémoire, par mot de 32 octets.
 pub const MEMORY_WORD: u64 = 3;
 /// Diviseur de la partie quadratique du coût mémoire.
@@ -29,9 +41,14 @@ pub const MEMORY_QUADRATIC_DIVISOR: u64 = 512;
 #[inline]
 pub fn static_cost(op: Opcode) -> Gas {
     Gas::new(match op {
-        Opcode::Stop | Opcode::Return | Opcode::Revert | Opcode::Invalid => ZERO,
+        Opcode::Stop | Opcode::Return | Opcode::Revert | Opcode::SStore | Opcode::Invalid => ZERO,
         Opcode::JumpDest => JUMPDEST,
-        Opcode::Pop | Opcode::Pc | Opcode::MSize | Opcode::Gas | Opcode::Push(0) => BASE,
+        Opcode::Pop
+        | Opcode::Pc
+        | Opcode::MSize
+        | Opcode::Gas
+        | Opcode::Caller
+        | Opcode::Push(0) => BASE,
         Opcode::Add
         | Opcode::Sub
         | Opcode::Lt
@@ -42,6 +59,8 @@ pub fn static_cost(op: Opcode) -> Gas {
         | Opcode::Or
         | Opcode::Xor
         | Opcode::Not
+        | Opcode::Shl
+        | Opcode::Shr
         | Opcode::MLoad
         | Opcode::MStore
         | Opcode::MStore8
@@ -50,7 +69,28 @@ pub fn static_cost(op: Opcode) -> Gas {
         | Opcode::Swap(_) => VERY_LOW,
         Opcode::Mul | Opcode::Div | Opcode::Mod => LOW,
         Opcode::Jump => MID,
-        Opcode::JumpI => HIGH,
+        Opcode::JumpI | Opcode::Exp => HIGH,
+        Opcode::Keccak256 => KECCAK_BASE,
+        Opcode::SLoad => SLOAD,
+    })
+}
+
+/// Coût dynamique de EXP : dépend de la taille de l'exposant.
+pub fn exp_cost(exponent: Word) -> Gas {
+    Gas::new(EXP_BYTE * exponent.byte_len() as u64)
+}
+
+/// Coût dynamique de KECCAK256 : par mot hashé, arrondi au supérieur.
+pub fn keccak_cost(len: usize) -> Gas {
+    Gas::new(KECCAK_WORD.saturating_mul((len as u64).div_ceil(32)))
+}
+
+/// Coût de SSTORE selon la valeur actuelle de la case et la nouvelle.
+pub fn sstore_cost(current: Word, new: Word) -> Gas {
+    Gas::new(if current.is_zero() && !new.is_zero() {
+        SSTORE_SET
+    } else {
+        SSTORE_RESET
     })
 }
 
@@ -106,6 +146,20 @@ mod tests {
         assert_eq!(memory_expansion_cost(0, 1).value(), 3);
         assert_eq!(memory_expansion_cost(2, 3).value(), 3);
         assert_eq!(memory_expansion_cost(0, 32).value(), 98);
+    }
+
+    #[test]
+    fn dynamic_costs() {
+        assert_eq!(exp_cost(Word::ZERO).value(), 0);
+        assert_eq!(exp_cost(Word::from(255u64)).value(), 50);
+        assert_eq!(exp_cost(Word::from(256u64)).value(), 100);
+        assert_eq!(exp_cost(Word::MAX).value(), 1_600);
+        assert_eq!(keccak_cost(0).value(), 0);
+        assert_eq!(keccak_cost(33).value(), 12);
+        let (zero, one) = (Word::ZERO, Word::from(1u64));
+        assert_eq!(sstore_cost(zero, one).value(), 20_000);
+        assert_eq!(sstore_cost(one, zero).value(), 5_000);
+        assert_eq!(sstore_cost(zero, zero).value(), 5_000);
     }
 
     #[test]
