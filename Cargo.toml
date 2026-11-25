@@ -15,6 +15,7 @@ tokio = { version = "1.54.1", features = ["full"] }
 
 [dev-dependencies]
 criterion = "0.8.2"
+tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "interpreter"
