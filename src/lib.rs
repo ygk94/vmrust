@@ -1,6 +1,7 @@
 //! Mini-EVM : une machine virtuelle à pile façon EVM, avec gas metering.
 
 pub mod api;
+pub mod disasm;
 pub mod error;
 pub mod gas;
 pub mod interpreter;
