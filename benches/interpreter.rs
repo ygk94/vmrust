@@ -44,7 +44,7 @@ fn execute(code: &[u8]) {
 fn bench_small_programs(c: &mut Criterion) {
     // (2 + 3) * 4
     let arith = hex::decode("600260030160040200").unwrap();
-    // Programme 1 du guide : 2 + 3 écrit en mémoire puis renvoyé
+    // 2 + 3 écrit en mémoire puis renvoyé
     let program_1 = hex::decode("600260030160005260206000f3").unwrap();
 
     c.bench_function("arith_small", |b| b.iter(|| execute(&arith)));
@@ -56,7 +56,7 @@ fn bench_loops(c: &mut Criterion) {
     for n in [100u16, 1_000, 10_000] {
         let code = countdown(n);
         // 7 instructions par tour : criterion affiche aussi le débit en instructions/s
-        group.throughput(Throughput::Elements(7 * n as u64));
+        group.throughput(Throughput::Elements(7 * u64::from(n)));
         group.bench_with_input(BenchmarkId::from_parameter(n), &code, |b, code| {
             b.iter(|| execute(code))
         });

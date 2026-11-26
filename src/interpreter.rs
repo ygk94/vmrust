@@ -49,6 +49,8 @@ pub struct Vm<'a, S: StateBackend = InMemoryState> {
     /// Contrat exécuté : c'est son storage qu'on lit et écrit.
     address: Address,
     caller: Address,
+    /// Données d'entrée de l'appel, vides par défaut.
+    calldata: &'a [u8],
 }
 
 impl<'a> Vm<'a> {
@@ -86,7 +88,15 @@ impl<'a, S: StateBackend> Vm<'a, S> {
             journal: HashMap::new(),
             address,
             caller,
+            calldata: &[],
         }
+    }
+
+    /// Donne au programme ses données d'entrée, lues par CALLDATALOAD, CALLDATASIZE et
+    /// CALLDATACOPY.
+    pub fn with_calldata(mut self, calldata: &'a [u8]) -> Self {
+        self.calldata = calldata;
+        self
     }
 
     /// Exécute jusqu'au bout.
@@ -206,18 +216,36 @@ impl<'a, S: StateBackend> Vm<'a, S> {
             })?,
 
             Opcode::Keccak256 => {
-                // Facturé AVANT de lire et de hasher.
+                // Le coût dépend de la taille : il est payé avant de lire la mémoire.
                 self.stack.require(2)?;
                 let size = to_usize(*self.stack.peek(1)?)?;
                 self.gas.charge(gas::keccak_cost(size))?;
                 let data = self.pop_memory_range()?;
-                let mut hash = [0u8; 32];
-                let mut hasher = Keccak::v256();
-                hasher.update(&data);
-                hasher.finalize(&mut hash);
-                self.stack.push(Word::from_be_bytes(hash))?;
+                self.stack.push(keccak256(&data))?;
             }
             Opcode::Caller => self.stack.push(self.caller.into())?,
+            Opcode::CallDataLoad => {
+                let offset = self.stack.pop()?;
+                let mut bytes = [0u8; WORD_SIZE];
+                self.read_calldata(offset, &mut bytes);
+                self.stack.push(Word::from_be_bytes(bytes))?;
+            }
+            Opcode::CallDataSize => self.stack.push(Word::from(self.calldata.len()))?,
+            Opcode::CallDataCopy => {
+                self.stack.require(3)?;
+                let memory_offset = self.stack.pop()?;
+                let data_offset = self.stack.pop()?;
+                let size = to_usize(self.stack.pop()?)?;
+                self.gas.charge(gas::copy_cost(size))?;
+                // Taille 0 : rien à copier, les offsets sont ignorés (même s'ils sont énormes).
+                if size > 0 {
+                    let memory_offset = to_usize(memory_offset)?;
+                    self.charge_memory(memory_offset, size)?;
+                    let mut data = vec![0u8; size];
+                    self.read_calldata(data_offset, &mut data);
+                    self.memory.write(memory_offset, &data);
+                }
+            }
 
             Opcode::Pop => {
                 self.stack.pop()?;
@@ -235,7 +263,7 @@ impl<'a, S: StateBackend> Vm<'a, S> {
 
             Opcode::MLoad => {
                 let offset = to_usize(self.stack.pop()?)?;
-                self.charge_memory(offset, 32)?;
+                self.charge_memory(offset, WORD_SIZE)?;
                 let value = self.memory.load_word(offset);
                 self.stack.push(value)?;
             }
@@ -243,7 +271,7 @@ impl<'a, S: StateBackend> Vm<'a, S> {
                 self.stack.require(2)?;
                 let offset = to_usize(self.stack.pop()?)?;
                 let value = self.stack.pop()?;
-                self.charge_memory(offset, 32)?;
+                self.charge_memory(offset, WORD_SIZE)?;
                 self.memory.store_word(offset, value);
             }
             Opcode::MStore8 => {
@@ -307,6 +335,18 @@ impl<'a, S: StateBackend> Vm<'a, S> {
             .get(&key)
             .copied()
             .unwrap_or_else(|| self.state.sload(&self.address, key))
+    }
+
+    /// Remplit `out` avec le calldata lu à partir de `offset`, complété par des zéros
+    /// au-delà de sa fin.
+    fn read_calldata(&self, offset: Word, out: &mut [u8]) {
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(self.calldata.len());
+        let available = &self.calldata[start..];
+        let len = available.len().min(out.len());
+        out[..len].copy_from_slice(&available[..len]);
+        out[len..].fill(0);
     }
 
     /// Dépile un offset puis une taille et lit cette zone, agrandissement facturé.
@@ -410,6 +450,14 @@ fn analyze_jumpdests(code: &[u8]) -> Vec<bool> {
     valid
 }
 
+fn keccak256(data: &[u8]) -> Word {
+    let mut hash = [0u8; 32];
+    let mut hasher = Keccak::v256();
+    hasher.update(data);
+    hasher.finalize(&mut hash);
+    Word::from_be_bytes(hash)
+}
+
 /// Convertit un mot venant de la pile en offset/taille utilisable.
 /// Jamais de `as` : un mot trop grand est une erreur, pas une troncature silencieuse.
 fn to_usize(word: Word) -> Result<usize> {
@@ -435,6 +483,13 @@ mod tests {
     /// Exécute et renvoie la pile finale (du bas vers le haut).
     fn final_stack(code: &[u8]) -> Vec<Word> {
         let mut vm = Vm::new(code, Gas::new(GAS));
+        vm.run().unwrap();
+        vm.stack().as_slice().to_vec()
+    }
+
+    /// Comme `final_stack`, avec des données d'entrée.
+    fn final_stack_with_calldata(code: &[u8], calldata: &[u8]) -> Vec<Word> {
+        let mut vm = Vm::new(code, Gas::new(GAS)).with_calldata(calldata);
         vm.run().unwrap();
         vm.stack().as_slice().to_vec()
     }
@@ -872,6 +927,71 @@ mod tests {
         let mut vm = Vm::with_state(&[0x33], Gas::new(2), state, Address::default(), caller);
         vm.run().unwrap();
         assert_eq!(vm.stack().as_slice(), &[w(0xbeef)]);
+    }
+
+    #[test]
+    fn calldataload_reads_a_word_padded_with_zeros() {
+        let data = [0xab, 0xcd];
+        // PUSH0, CALLDATALOAD  ->  0xabcd suivi de 30 octets nuls
+        assert_eq!(
+            final_stack_with_calldata(&code("5f35"), &data),
+            vec![w(0xabcd) << 240]
+        );
+        // PUSH1 1, CALLDATALOAD  ->  0xcd suivi de 31 octets nuls
+        assert_eq!(
+            final_stack_with_calldata(&code("600135"), &data),
+            vec![w(0xcd) << 248]
+        );
+        // Offset après la fin, puis offset qui ne tient pas dans un usize
+        assert_eq!(
+            final_stack_with_calldata(&code("600235"), &data),
+            vec![w(0)]
+        );
+        assert_eq!(
+            final_stack_with_calldata(&code("5f1935"), &data),
+            vec![w(0)]
+        );
+    }
+
+    #[test]
+    fn calldatasize_pushes_the_length() {
+        assert_eq!(
+            final_stack_with_calldata(&code("36"), &[1, 2, 3]),
+            vec![w(3)]
+        );
+        assert_eq!(final_stack(&code("36")), vec![w(0)]);
+    }
+
+    #[test]
+    fn calldatacopy_pads_with_zeros_and_charges_per_word() {
+        // PUSH0, NOT, PUSH0, MSTORE : 32 octets à 0xff (13 gas), puis
+        // PUSH1 4 (taille), PUSH1 1 (offset dans le calldata), PUSH0 (offset mémoire),
+        // CALLDATACOPY : 8 gas + 3 + 3 pour un mot copié
+        let c = code("5f195f52600460015f37");
+        let mut vm = Vm::new(&c, Gas::new(GAS)).with_calldata(&[0xaa, 0xbb, 0xcc]);
+        assert_eq!(
+            vm.run().unwrap(),
+            ExecutionOutcome::Success {
+                return_data: vec![],
+                gas_used: 13 + 8 + 3 + 3
+            }
+        );
+        assert_eq!(vm.memory().as_slice()[..5], [0xbb, 0xcc, 0x00, 0x00, 0xff]);
+    }
+
+    #[test]
+    fn calldatacopy_of_zero_bytes_ignores_huge_offsets() {
+        // PUSH0 (taille), PUSH0 NOT (offset dans le calldata), PUSH0 NOT (offset mémoire),
+        // CALLDATACOPY
+        let c = code("5f5f195f1937");
+        let mut vm = Vm::new(&c, Gas::new(GAS));
+        vm.run().unwrap();
+        assert_eq!(vm.memory().size(), 0);
+        // Même chose avec une taille de 1 : l'offset mémoire est invalide
+        assert_eq!(
+            run(&code("60015f5f1937")).unwrap_err(),
+            VmError::InvalidMemoryOffset
+        );
     }
 
     #[test]
