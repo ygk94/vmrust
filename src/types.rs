@@ -137,10 +137,8 @@ mod tests {
         let text = "0x000000000000000000000000000000000000abcd";
         let address: Address = text.parse().unwrap();
         assert_eq!(address.to_string(), text);
-        assert_eq!(
-            <Address as Into<Word>>::into(address),
-            Word::from(0xabcdu64)
-        );
+        let word: Word = address.into();
+        assert_eq!(word, Word::from(0xabcdu64));
         assert!("0x12".parse::<Address>().is_err());
     }
 

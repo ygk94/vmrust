@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::types::{Address, Word};
 
-/// Ce qui survit entre deux exécutions, sans dire comment c'est stocké.
+/// État conservé entre deux exécutions, quel que soit le support de stockage.
 pub trait StateBackend {
     /// Code du contrat à cette adresse (vide si aucun).
     fn code(&self, address: &Address) -> Vec<u8>;
@@ -22,7 +22,7 @@ pub trait StateBackend {
     fn sstore(&mut self, address: &Address, key: Word, value: Word);
 }
 
-/// Permet de prêter un état à la VM sans le lui donner.
+/// Permet de passer `&mut state` à la VM et de retrouver l'état après l'exécution.
 impl<S: StateBackend> StateBackend for &mut S {
     fn code(&self, address: &Address) -> Vec<u8> {
         (**self).code(address)

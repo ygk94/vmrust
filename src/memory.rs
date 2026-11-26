@@ -13,7 +13,7 @@ use crate::types::Word;
 pub const WORD_SIZE: usize = 32;
 
 /// Plafond de sécurité : au-delà, on refuse plutôt que d'allouer.
-/// 32 Mio coûteraient déjà plus de 2 milliards de gas, aucun programme honnête n'y arrive.
+/// 32 Mio coûteraient déjà plus de 2 milliards de gas.
 pub const MEMORY_LIMIT: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -89,6 +89,15 @@ impl Memory {
         self.data[offset] = value;
     }
 
+    /// Écrit `data` à partir de `offset` (CALLDATACOPY). Sans effet si `data` est vide.
+    pub fn write(&mut self, offset: usize, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        self.expand(offset, data.len());
+        self.data[offset..offset + data.len()].copy_from_slice(data);
+    }
+
     /// Copie de `[offset, offset + len)` (RETURN, REVERT). Vide si `len == 0`.
     pub fn read(&mut self, offset: usize, len: usize) -> Vec<u8> {
         if len == 0 {
@@ -161,6 +170,16 @@ mod tests {
         assert!(m.read(1_000_000, 0).is_empty());
         m.expand(usize::MAX, 0);
         assert_eq!(m.size(), 0);
+    }
+
+    #[test]
+    fn write_copies_bytes_and_expands() {
+        let mut m = Memory::new();
+        m.write(1, &[0xaa, 0xbb]);
+        assert_eq!(m.size(), 32);
+        assert_eq!(m.read(0, 4), vec![0x00, 0xaa, 0xbb, 0x00]);
+        m.write(usize::MAX, &[]);
+        assert_eq!(m.size(), 32);
     }
 
     #[test]

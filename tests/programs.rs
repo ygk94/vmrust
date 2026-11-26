@@ -92,6 +92,23 @@ fn computes_10_factorial_with_a_loop() {
 }
 
 #[test]
+fn adds_the_two_numbers_passed_as_calldata() {
+    // PUSH0 CALLDATALOAD, PUSH1 32 CALLDATALOAD, ADD, puis renvoie le résultat
+    let code = hex::decode("5f35602035015f5260205ff3").unwrap();
+    let calldata = [word(2), word(3)].concat();
+    assert_eq!(
+        Vm::new(&code, Gas::new(100_000))
+            .with_calldata(&calldata)
+            .run()
+            .unwrap(),
+        ExecutionOutcome::Success {
+            return_data: word(5),
+            gas_used: 27
+        }
+    );
+}
+
+#[test]
 fn revert_with_empty_data() {
     assert_eq!(
         run_hex("60006000fd", 100_000).unwrap(),

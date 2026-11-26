@@ -10,9 +10,10 @@ use crate::types::{Gas, Word};
 pub const ZERO: u64 = 0;
 /// JUMPDEST.
 pub const JUMPDEST: u64 = 1;
-/// POP, PC, MSIZE, GAS, CALLER, PUSH0.
+/// POP, PC, MSIZE, GAS, CALLER, CALLDATASIZE, PUSH0.
 pub const BASE: u64 = 2;
-/// ADD, SUB, comparaisons, bits, PUSH1-32, DUP, SWAP, MLOAD, MSTORE, MSTORE8.
+/// ADD, SUB, comparaisons, bits, CALLDATALOAD, CALLDATACOPY, PUSH1-32, DUP, SWAP, MLOAD,
+/// MSTORE, MSTORE8.
 pub const VERY_LOW: u64 = 3;
 /// MUL, DIV, MOD.
 pub const LOW: u64 = 5;
@@ -26,6 +27,8 @@ pub const EXP_BYTE: u64 = 50;
 pub const KECCAK_BASE: u64 = 30;
 /// KECCAK256, par mot de 32 octets hashé.
 pub const KECCAK_WORD: u64 = 6;
+/// CALLDATACOPY, par mot de 32 octets copié.
+pub const COPY_WORD: u64 = 3;
 /// SLOAD (simplifié : pas de distinction accès froid / chaud).
 pub const SLOAD: u64 = 2_100;
 /// SSTORE qui remplit une case vide.
@@ -48,6 +51,7 @@ pub fn static_cost(op: Opcode) -> Gas {
         | Opcode::MSize
         | Opcode::Gas
         | Opcode::Caller
+        | Opcode::CallDataSize
         | Opcode::Push(0) => BASE,
         Opcode::Add
         | Opcode::Sub
@@ -61,6 +65,8 @@ pub fn static_cost(op: Opcode) -> Gas {
         | Opcode::Not
         | Opcode::Shl
         | Opcode::Shr
+        | Opcode::CallDataLoad
+        | Opcode::CallDataCopy
         | Opcode::MLoad
         | Opcode::MStore
         | Opcode::MStore8
@@ -83,6 +89,11 @@ pub fn exp_cost(exponent: Word) -> Gas {
 /// Coût dynamique de KECCAK256 : par mot hashé, arrondi au supérieur.
 pub fn keccak_cost(len: usize) -> Gas {
     Gas::new(KECCAK_WORD.saturating_mul((len as u64).div_ceil(32)))
+}
+
+/// Coût dynamique de CALLDATACOPY : par mot copié, arrondi au supérieur.
+pub fn copy_cost(len: usize) -> Gas {
+    Gas::new(COPY_WORD.saturating_mul((len as u64).div_ceil(32)))
 }
 
 /// Coût de SSTORE selon la valeur actuelle de la case et la nouvelle.
@@ -126,6 +137,9 @@ mod tests {
         assert_eq!(static_cost(Opcode::Mul).value(), 5);
         assert_eq!(static_cost(Opcode::Jump).value(), 8);
         assert_eq!(static_cost(Opcode::JumpI).value(), 10);
+        assert_eq!(static_cost(Opcode::CallDataLoad).value(), 3);
+        assert_eq!(static_cost(Opcode::CallDataSize).value(), 2);
+        assert_eq!(static_cost(Opcode::CallDataCopy).value(), 3);
     }
 
     #[test]
@@ -156,6 +170,8 @@ mod tests {
         assert_eq!(exp_cost(Word::MAX).value(), 1_600);
         assert_eq!(keccak_cost(0).value(), 0);
         assert_eq!(keccak_cost(33).value(), 12);
+        assert_eq!(copy_cost(0).value(), 0);
+        assert_eq!(copy_cost(33).value(), 6);
         let (zero, one) = (Word::ZERO, Word::from(1u64));
         assert_eq!(sstore_cost(zero, one).value(), 20_000);
         assert_eq!(sstore_cost(one, zero).value(), 5_000);

@@ -20,5 +20,5 @@ sleep 0.5
 kill "$PID" 2> /dev/null || true
 
 inferno-collapse-sample "$TMP/sample.txt" | rustfilt > "$TMP/folded.txt"
-inferno-flamegraph --title "mini-EVM : boucle de 10 000 tours" "$TMP/folded.txt" > "$OUT"
+inferno-flamegraph --title "mini-EVM: 10,000-iteration loop" "$TMP/folded.txt" > "$OUT"
 echo "flamegraph écrit dans $OUT"

@@ -6,6 +6,9 @@
 //! - `POST /contracts/{address}/call` : exécute ce code, son storage est conservé ;
 //! - `GET  /contracts/{address}/storage/{key}` : lit une case (clé en hexadécimal).
 //!
+//! Les deux exécutions acceptent un `caller` (adresse) et un `calldata` (hexadécimal)
+//! facultatifs.
+//!
 //! Une requête invalide donne un code HTTP 4xx. Un programme qui échoue (out of gas...)
 //! donne un 200 avec `status: "error"` : c'est un résultat, pas une panne.
 
@@ -29,27 +32,29 @@ use crate::types::{Address, Gas, Word};
 pub const MAX_GAS_LIMIT: u64 = 30_000_000;
 
 #[derive(Debug, Deserialize)]
-pub struct ExecuteRequest {
+struct ExecuteRequest {
     bytecode: String,
     gas_limit: u64,
     caller: Option<String>,
+    calldata: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct DeployRequest {
+struct DeployRequest {
     address: String,
     code: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CallRequest {
+struct CallRequest {
     gas_limit: u64,
     caller: Option<String>,
+    calldata: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum ExecuteResponse {
+enum ExecuteResponse {
     Success { return_data: String, gas_used: u64 },
     Revert { return_data: String, gas_used: u64 },
     Error { error: String, gas_used: u64 },
@@ -81,9 +86,10 @@ async fn execute(body: JsonBody<ExecuteRequest>) -> ApiResult<Json<ExecuteRespon
     let code = parse_hex(&req.bytecode)?;
     let gas = parse_gas(req.gas_limit)?;
     let caller = parse_caller(req.caller)?;
+    let calldata = parse_calldata(req.calldata)?;
     run_blocking(move || {
         let state = InMemoryState::default();
-        run(&code, gas, state, Address::default(), caller)
+        run(&code, gas, state, Address::default(), caller, &calldata)
     })
     .await
 }
@@ -121,6 +127,7 @@ async fn call(
     let address = parse_address(&address)?;
     let gas = parse_gas(req.gas_limit)?;
     let caller = parse_caller(req.caller)?;
+    let calldata = parse_calldata(req.calldata)?;
     // Verrou gardé toute l'exécution : les appels sont appliqués un par un.
     let mut state = state.write_owned().await;
     let code = state.code(&address);
@@ -130,7 +137,7 @@ async fn call(
             "no contract at this address",
         ));
     }
-    run_blocking(move || run(&code, gas, &mut *state, address, caller)).await
+    run_blocking(move || run(&code, gas, &mut *state, address, caller, &calldata)).await
 }
 
 async fn read_storage(
@@ -150,8 +157,10 @@ fn run<S: StateBackend>(
     state: S,
     address: Address,
     caller: Address,
+    calldata: &[u8],
 ) -> ExecuteResponse {
-    match Vm::with_state(code, gas, state, address, caller).run() {
+    let mut vm = Vm::with_state(code, gas, state, address, caller).with_calldata(calldata);
+    match vm.run() {
         Ok(ExecutionOutcome::Success {
             return_data,
             gas_used,
@@ -221,6 +230,10 @@ fn parse_address(text: &str) -> ApiResult<Address> {
 
 fn parse_caller(caller: Option<String>) -> ApiResult<Address> {
     caller.map_or(Ok(Address::default()), |text| parse_address(&text))
+}
+
+fn parse_calldata(calldata: Option<String>) -> ApiResult<Vec<u8>> {
+    calldata.map_or(Ok(Vec::new()), |text| parse_hex(&text))
 }
 
 fn parse_word(text: &str) -> ApiResult<Word> {
@@ -315,6 +328,7 @@ mod tests {
             r#"{"bytecode":"zz","gas_limit":1}"#,
             r#"{"bytecode":"00","gas_limit":30000001}"#,
             r#"{"bytecode":"00","gas_limit":1,"caller":"0x12"}"#,
+            r#"{"bytecode":"00","gas_limit":1,"calldata":"zz"}"#,
         ] {
             let (status, answer) = post_execute(body).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -330,6 +344,34 @@ mod tests {
         ))
         .await;
         assert_eq!(body["return_data"], format!("0x{:064x}", 0xaa));
+    }
+
+    #[tokio::test]
+    async fn calldata_is_visible_to_the_program() {
+        // CALLDATASIZE, PUSH0, PUSH0, CALLDATACOPY, CALLDATASIZE, PUSH0, RETURN
+        let (status, body) = post_execute(
+            r#"{"bytecode":"365f5f37365ff3","gas_limit":1000,"calldata":"0x68656c6c6f"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["return_data"], "0x68656c6c6f");
+    }
+
+    #[tokio::test]
+    async fn contract_calls_receive_their_calldata() {
+        let app = router();
+        // PUSH0 CALLDATALOAD PUSH0 SSTORE : range le premier mot du calldata dans la case 0
+        let deploy = format!(r#"{{"address":"{CONTRACT}","code":"5f355f55"}}"#);
+        send(&app, "POST", "/contracts", &deploy).await;
+
+        let uri = format!("/contracts/{CONTRACT}/call");
+        let call = format!(r#"{{"gas_limit":100000,"calldata":"0x{:064x}"}}"#, 42);
+        let (_, body) = send(&app, "POST", &uri, &call).await;
+        assert_eq!(body["status"], "success");
+
+        let uri = format!("/contracts/{CONTRACT}/storage/0");
+        let (_, body) = send(&app, "GET", &uri, "").await;
+        assert_eq!(body["value"], format!("0x{:064x}", 42));
     }
 
     #[tokio::test]

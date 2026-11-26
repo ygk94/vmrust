@@ -30,6 +30,9 @@ pub enum Opcode {
     // 0x20 - 0x3f : hash et environnement
     Keccak256,
     Caller,
+    CallDataLoad,
+    CallDataSize,
+    CallDataCopy,
     // 0x50 - 0x5b : pile, mémoire, storage, contrôle
     Pop,
     MLoad,
@@ -57,6 +60,7 @@ pub enum Opcode {
 
 impl Opcode {
     /// Décode un octet de bytecode. Seule source de `InvalidOpcode`.
+    #[inline]
     pub fn from_byte(byte: u8) -> Result<Opcode> {
         Ok(match byte {
             0x00 => Opcode::Stop,
@@ -78,6 +82,9 @@ impl Opcode {
             0x1c => Opcode::Shr,
             0x20 => Opcode::Keccak256,
             0x33 => Opcode::Caller,
+            0x35 => Opcode::CallDataLoad,
+            0x36 => Opcode::CallDataSize,
+            0x37 => Opcode::CallDataCopy,
             0x50 => Opcode::Pop,
             0x51 => Opcode::MLoad,
             0x52 => Opcode::MStore,
@@ -122,6 +129,9 @@ impl Opcode {
             Opcode::Shr => 0x1c,
             Opcode::Keccak256 => 0x20,
             Opcode::Caller => 0x33,
+            Opcode::CallDataLoad => 0x35,
+            Opcode::CallDataSize => 0x36,
+            Opcode::CallDataCopy => 0x37,
             Opcode::Pop => 0x50,
             Opcode::MLoad => 0x51,
             Opcode::MStore => 0x52,
@@ -180,6 +190,9 @@ impl fmt::Display for Opcode {
             Opcode::Shr => "SHR",
             Opcode::Keccak256 => "KECCAK256",
             Opcode::Caller => "CALLER",
+            Opcode::CallDataLoad => "CALLDATALOAD",
+            Opcode::CallDataSize => "CALLDATASIZE",
+            Opcode::CallDataCopy => "CALLDATACOPY",
             Opcode::Pop => "POP",
             Opcode::MLoad => "MLOAD",
             Opcode::MStore => "MSTORE",
